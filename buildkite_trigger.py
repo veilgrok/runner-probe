@@ -92,6 +92,9 @@ def main() -> None:
     parser.add_argument("--commit", default="HEAD")
     parser.add_argument("--jobs", type=int, default=10)
     parser.add_argument("--bridge", action="store_true")
+    parser.add_argument("--sizes", action="store_true", help="Run one probe per queue in --size-queues instead of the N-job matrix")
+    parser.add_argument("--size-queues", default="hosted,linux-large,linux-arm64-small")
+    parser.add_argument("--env-file", type=Path, default=None, help="Env file whose keys are passed as build env (values never printed)")
     parser.add_argument("--queue", default="hosted", help="Hosted or self-hosted queue name (BUILDKITE_QUEUE)")
     parser.add_argument("--dispatch-time", default="")
     parser.add_argument("--timeout", type=int, default=1800)
@@ -104,19 +107,48 @@ def main() -> None:
     n = max(1, min(20, int(args.jobs)))
     when = args.dispatch_time.strip() or utc_now()
     env = {
-        "RUN_PROBE": "0" if args.bridge else "1",
+        "RUN_PROBE": "1" if (not args.bridge and not args.sizes) else "0",
         "RUN_BRIDGE": "1" if args.bridge else "0",
+        "RUN_SIZES": "1" if args.sizes else "0",
         "JOBS": str(n),
         "DISPATCH_TIME": when,
         "BUILDKITE_QUEUE": args.queue,
+        "SIZE_QUEUES": args.size_queues,
     }
+    if args.env_file:
+        if not args.env_file.is_file():
+            raise SystemExit(f"env file not found: {args.env_file}")
+        mapping = {
+            "BOX_ID": "UPSTASH_BOX_ID",
+            "BOX_API_KEY": "UPSTASH_BOX_API_KEY",
+            "BOX_BASE_URL": "UPSTASH_BOX_BASE_URL",
+            "UPSTASH_BOX_ID": "UPSTASH_BOX_ID",
+            "UPSTASH_BOX_API_KEY": "UPSTASH_BOX_API_KEY",
+            "UPSTASH_BOX_BASE_URL": "UPSTASH_BOX_BASE_URL",
+        }
+        loaded_keys = []
+        for line in args.env_file.read_text(encoding="utf-8").splitlines():
+            s = line.strip()
+            if not s or s.startswith("#") or "=" not in s:
+                continue
+            k, v = s.split("=", 1)
+            k = k.strip()
+            v = v.strip().strip("'").strip('"')
+            dest = mapping.get(k)
+            if dest and v:
+                env[dest] = v
+                loaded_keys.append(dest)
+        print("loaded build env keys from file:", sorted(set(loaded_keys)))
     body = {
         "commit": args.commit,
         "branch": args.branch,
         "message": "bridge" if args.bridge else f"probe jobs={n}",
-        "env": env,
+        "env": {k: ("[set]" if k.startswith("UPSTASH_") else v) for k, v in env.items()},
     }
-    print(json.dumps({"org": args.org, "pipeline": args.pipeline, "payload": body}, indent=2))
+    public_env = {k: ("[set]" if k.startswith("UPSTASH_") else v) for k, v in env.items()}
+    public_body = dict(body)
+    public_body["env"] = public_env
+    print(json.dumps({"org": args.org, "pipeline": args.pipeline, "payload": public_body}, indent=2))
     if args.dry_run:
         print("dry-run: no build triggered")
         return

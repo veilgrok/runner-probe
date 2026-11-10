@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Upload Buildkite probe/bridge steps. Only runs when RUN_PROBE or RUN_BRIDGE is 1."""
+"""Upload Buildkite probe/bridge/size steps. Only runs when RUN_PROBE, RUN_SIZES, or RUN_BRIDGE is 1."""
 
 from __future__ import annotations
 
@@ -9,53 +9,112 @@ import sys
 from pathlib import Path
 
 
+QUEUE_CLASS = {
+    "hosted": "linux-amd64-small",
+    "linux-small": "linux-amd64-small",
+    "linux-medium": "linux-amd64-medium",
+    "linux-large": "linux-amd64-large",
+    "linux-xlarge": "linux-amd64-xlarge",
+    "linux-arm64-small": "linux-arm64-small",
+    "linux-arm64-medium": "linux-arm64-medium",
+    "linux-arm64-large": "linux-arm64-large",
+}
+
+
 def yaml_quote(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "") + '"'
 
 
-def probe_steps(n: int, dispatch: str) -> list[str]:
-    lines: list[str] = ["  - group: \":microscope: probe\"", "    key: probe-group", "    steps:"]
+def probe_command(meta_key: str) -> list[str]:
+    # Publish probe.json to build meta-data so we can read it with the
+    # existing token (read_builds). The token cannot read artifacts or logs.
+    return [
+        "        command: |",
+        "          set +x",
+        '          export RUNNER_NAME="buildkite-${RESOURCE_CLASS}-${BUILDKITE_BUILD_NUMBER:-0}-${MATRIX_INDEX}"',
+        '          export RUNNER_OS="${RUNNER_OS:-Linux}"',
+        '          export RUNNER_ARCH="${RUNNER_ARCH:-$(uname -m)}"',
+        "          python3 .github/scripts/probe_job.py",
+        f"          mkdir -p artifacts/{meta_key}",
+        f"          cp probe.json artifacts/{meta_key}/probe.json",
+        f"          buildkite-agent meta-data set {yaml_quote(meta_key)} \"$(cat probe.json)\"",
+    ]
+
+
+def probe_jobs_on_queue(n: int, dispatch: str, queue: str, key_prefix: str = "probe") -> list[str]:
+    resource = QUEUE_CLASS.get(queue, queue)
+    lines: list[str] = [
+        f'  - group: ":microscope: probe {queue}"',
+        f"    key: {key_prefix}-group",
+        "    steps:",
+    ]
     for i in range(n):
+        meta_key = f"probe-{resource}-{i}"
         lines += [
-            f'      - label: ":microscope: probe {i}"',
-            f"        key: probe-{i}",
+            f'      - label: ":microscope: {queue} {i}"',
+            f"        key: {key_prefix}-{i}",
+            f'        agents:',
+            f'          queue: {yaml_quote(queue)}',
             "        timeout_in_minutes: 3",
             "        env:",
             '          PROBE_POOL: "buildkite"',
-            '          RESOURCE_CLASS: "linux-amd64-small"',
+            f"          RESOURCE_CLASS: {yaml_quote(resource)}",
             f'          MATRIX_INDEX: "{i}"',
             f"          DISPATCH_TIME: {yaml_quote(dispatch)}",
-            "        command: |",
-            "          set +x",
-            '          export RUNNER_NAME="buildkite-${RESOURCE_CLASS}-${BUILDKITE_BUILD_NUMBER:-0}-${MATRIX_INDEX}"',
-            '          export RUNNER_OS="${RUNNER_OS:-Linux}"',
-            '          export RUNNER_ARCH="${RUNNER_ARCH:-$(uname -m)}"',
-            "          python3 .github/scripts/probe_job.py",
-            f"          mkdir -p artifacts/probe-{i}",
-            f"          cp probe.json artifacts/probe-{i}/probe.json",
+            *probe_command(meta_key),
             "        artifact_paths:",
-            f"          - artifacts/probe-{i}/probe.json",
+            f"          - artifacts/{meta_key}/probe.json",
         ]
+    dep_keys = [f"{key_prefix}-{i}" for i in range(n)]
     lines += [
-        "  - label: \":bar_chart: aggregate\"",
-        "    key: aggregate",
+        f'  - label: ":bar_chart: aggregate {queue}"',
+        f"    key: {key_prefix}-aggregate",
         "    depends_on:",
-        *[f"      - probe-{i}" for i in range(n)],
+        *[f"      - {k}" for k in dep_keys],
         "    timeout_in_minutes: 3",
         "    command: |",
         "      set +x",
         "      mkdir -p artifacts",
         "      buildkite-agent artifact download 'artifacts/probe-*/probe.json' artifacts/ || true",
-        "      python3 .github/scripts/aggregate.py",
+        "      python3 .github/scripts/aggregate.py || true",
+        "      if [ -f summary.json ]; then",
+        f"        buildkite-agent meta-data set {yaml_quote(key_prefix + '-summary')} \"$(cat summary.json)\"",
+        "      fi",
         "    artifact_paths:",
         "      - summary.json",
     ]
     return lines
 
 
+def size_steps(queues: list[str], dispatch: str) -> list[str]:
+    lines: list[str] = []
+    keys: list[str] = []
+    for i, queue in enumerate(queues):
+        resource = QUEUE_CLASS.get(queue, queue)
+        meta_key = f"size-{resource}"
+        key = f"size-{i}"
+        keys.append(key)
+        lines += [
+            f'  - label: ":microscope: size {queue}"',
+            f"    key: {key}",
+            "    agents:",
+            f"      queue: {yaml_quote(queue)}",
+            "    timeout_in_minutes: 3",
+            "    env:",
+            '      PROBE_POOL: "buildkite"',
+            f"      RESOURCE_CLASS: {yaml_quote(resource)}",
+            '      MATRIX_INDEX: "0"',
+            f"      DISPATCH_TIME: {yaml_quote(dispatch)}",
+            *probe_command(meta_key),
+            "    artifact_paths:",
+            f"      - artifacts/{meta_key}/probe.json",
+        ]
+    return lines
+
+
 def bridge_steps(dispatch: str) -> list[str]:
     return [
-        "  - label: \":bridge_at_night: upstash bridge\"",
+        '  - label: ":bridge_at_night: upstash bridge"',
         "    key: bridge",
         "    timeout_in_minutes: 5",
         "    env:",
@@ -74,6 +133,15 @@ def bridge_steps(dispatch: str) -> list[str]:
         "      fi",
         "      npm install --omit=dev --no-audit --no-fund",
         "      python3 equiv/run_bridge_test.py",
+        "      if [ -f bridge-out/bridge-summary.json ]; then",
+        "        buildkite-agent meta-data set bridge-summary \"$(cat bridge-out/bridge-summary.json)\"",
+        "      fi",
+        "      if [ -f bridge-out/bridge-report.json ]; then",
+        "        buildkite-agent meta-data set bridge-report \"$(cat bridge-out/bridge-report.json)\"",
+        "      fi",
+        "      if [ -f bridge-out/rtt.json ]; then",
+        "        buildkite-agent meta-data set rtt \"$(cat bridge-out/rtt.json)\"",
+        "      fi",
         "    artifact_paths:",
         "      - bridge-out/**",
     ]
@@ -82,8 +150,9 @@ def bridge_steps(dispatch: str) -> list[str]:
 def main() -> None:
     run_probe = os.environ.get("RUN_PROBE") == "1"
     run_bridge = os.environ.get("RUN_BRIDGE") == "1"
-    if not run_probe and not run_bridge:
-        print("RUN_PROBE and RUN_BRIDGE are unset; uploading no steps")
+    run_sizes = os.environ.get("RUN_SIZES") == "1"
+    if not run_probe and not run_bridge and not run_sizes:
+        print("RUN_PROBE, RUN_SIZES, and RUN_BRIDGE are unset; uploading no steps")
         return
 
     try:
@@ -92,15 +161,16 @@ def main() -> None:
         raise SystemExit(f"JOBS must be an integer: {exc}") from exc
     dispatch = os.environ.get("DISPATCH_TIME") or ""
     queue = os.environ.get("BUILDKITE_QUEUE") or "hosted"
+    size_queues = [q.strip() for q in (os.environ.get("SIZE_QUEUES") or "hosted,linux-large,linux-arm64-small").split(",") if q.strip()]
 
     lines = [
         "# Generated by .github/scripts/buildkite_upload.py; not hand-edited.",
-        "agents:",
-        f'  queue: "{queue}"',
         "steps:",
     ]
     if run_probe:
-        lines += probe_steps(n, dispatch)
+        lines += probe_jobs_on_queue(n, dispatch, queue, key_prefix="probe")
+    if run_sizes:
+        lines += size_steps(size_queues, dispatch)
     if run_bridge:
         lines += bridge_steps(dispatch)
 
@@ -108,7 +178,9 @@ def main() -> None:
     uploaded.write_text("\n".join(lines) + "\n", encoding="utf-8")
     kind = []
     if run_probe:
-        kind.append(f"{n} probe jobs")
+        kind.append(f"{n} probe jobs on {queue}")
+    if run_sizes:
+        kind.append("sizes " + ",".join(size_queues))
     if run_bridge:
         kind.append("bridge")
     print("uploading", uploaded, "(" + ", ".join(kind) + ")")

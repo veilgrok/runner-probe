@@ -35,6 +35,6 @@ agents:
 steps:
   - label: ":pipeline: upload probe or bridge"
     key: upload
-    if: 'build.env("RUN_PROBE") == "1" || build.env("RUN_BRIDGE") == "1"'
+    if: 'build.env("RUN_PROBE") == "1" || build.env("RUN_BRIDGE") == "1" || build.env("RUN_SIZES") == "1"'
     command: python3 .github/scripts/buildkite_upload.py
     timeout_in_minutes: 2
