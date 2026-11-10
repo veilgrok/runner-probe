@@ -80,7 +80,7 @@ def stop_proc(proc: subprocess.Popen | None, sig: int = signal.SIGTERM) -> None:
         proc.wait(timeout=5)
 
 
-def start_controller(mode: str, intervals, expected, required: list[str], timeout: float, out: Path, status: Path) -> subprocess.Popen:
+def start_controller(mode: str, intervals, expected, required: list[str], timeout: float, out: Path, status: Path, no_bye: bool = False) -> subprocess.Popen:
     cmd = [
         PYTHON,
         str(EQUIV / "controller.py"),
@@ -107,6 +107,8 @@ def start_controller(mode: str, intervals, expected, required: list[str], timeou
         "--out",
         str(out),
     ]
+    if no_bye:
+        cmd.append("--no-bye")
     return start_logged(cmd, OUT_DIR / f"{mode}-controller.log")
 
 
@@ -217,17 +219,21 @@ def main() -> None:
         print("PHASE box-only", flush=True)
         out = OUT_DIR / "box-only.json"
         status = OUT_DIR / "box-only-status.json"
-        ctrl = start_controller("box-only", compare_intervals, compare_expected, ["upstash-box"], 90, out, status)
+        ctrl = start_controller("box-only", compare_intervals, compare_expected, ["upstash-box"], 90, out, status, no_bye=True)
         try:
             report["box_only"] = wait_controller(ctrl, out, 100)
         finally:
             stop_proc(ctrl)
 
         print("PHASE combined", flush=True)
+        # Restart the box worker in case a previous phase stopped it.
+        node("box_setup.mjs", "stop-worker", timeout=30)
+        node("box_setup.mjs", "start-worker", timeout=30)
+        time.sleep(0.4)
         local = start_local_worker("runner", 27700, WORK_MS)
         out = OUT_DIR / "combined.json"
         status = OUT_DIR / "combined-status.json"
-        ctrl = start_controller("combined", compare_intervals, compare_expected, ["runner", "upstash-box"], 90, out, status)
+        ctrl = start_controller("combined", compare_intervals, compare_expected, ["runner", "upstash-box"], 90, out, status, no_bye=True)
         try:
             report["combined"] = wait_controller(ctrl, out, 100)
         finally:
@@ -244,7 +250,7 @@ def main() -> None:
         local = start_local_worker("runner", 27700, DROP_WORK_MS)
         out = OUT_DIR / "midrun.json"
         status = OUT_DIR / "midrun-status.json"
-        ctrl = start_controller("midrun", drop_intervals, drop_expected, ["runner", "upstash-box"], 150, out, status)
+        ctrl = start_controller("midrun", drop_intervals, drop_expected, ["runner", "upstash-box"], 150, out, status, no_bye=True)
         killed = False
         kill_unix = None
         status_at_kill = {}

@@ -23,6 +23,7 @@ def main() -> None:
     p.add_argument("--heartbeat-timeout", type=float, default=4.0)
     p.add_argument("--status-path", default="")
     p.add_argument("--out", required=True)
+    p.add_argument("--no-bye", action="store_true", help="Do not send bye when finishing, so the worker can be reused")
     args = p.parse_args()
 
     host, port = args.listen.rsplit(":", 1)
@@ -209,12 +210,13 @@ def main() -> None:
     for row in results.values():
         by_worker[row["name"]] = by_worker.get(row["name"], 0) + 1
 
-    # Tell live workers to exit; ignore errors.
-    for w in workers.values():
-        try:
-            send(w["addr"], {"t": "bye"})
-        except OSError:
-            pass
+    # Tell live workers to exit unless the caller wants to reuse them.
+    if not args.no_bye:
+        for w in workers.values():
+            try:
+                send(w["addr"], {"t": "bye"})
+            except OSError:
+                pass
 
     out = {
         "mode": args.mode,
