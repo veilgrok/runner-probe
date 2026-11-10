@@ -146,3 +146,121 @@ You can also run a workflow from the Actions tab, passing `jobs` and a
 - The Upstash box must already exist. This repo does not create, pay
   for, or enable `keepAlive` on a box.
 - Outbound UDP notes in the probe are observational only.
+
+## Overflow pools (CircleCI, Buildkite, Blacksmith)
+
+These are off by default. A push to `main` must not start probe or bridge
+jobs on any of them. Trigger scripts require `--confirm` and will not
+run against a service until its token file exists and you opt in.
+
+The Upstash dispatcher in `equiv/dispatcher.py` treats `gha`, `circleci`,
+`buildkite`, `blacksmith`, and `upstash_box` as pluggable pools. It issues
+per-task leases, renews them on worker heartbeats, reassigns a task if a
+worker goes silent (the same mid-run-kill idea as `bridge.yml`), and
+sends `drain` so workers exit themselves when the queue is empty. Remote
+pools refuse to spawn unless `allow_remote=True`, and even then this
+harness does not auto-trigger them yet. Use the scripts below by hand.
+
+Local test, simulated pools only (no CI, no Upstash, no tokens):
+
+```bash
+python3 equiv/test_dispatcher.py
+```
+
+### CircleCI
+
+Published Free-plan limits used in `.circleci/config.yml`: docker
+`medium` (2 vCPU / 4 GB) for the N-way concurrency matrix; docker
+`large` (4 vCPU / 8 GB, the largest free x86 Docker class); docker
+`arm.large` (4 vCPU / 16 GB, the largest free Arm Docker class); and
+machine `arm.medium` (2 vCPU / 8 GB). Docker xlarge is Performance-only
+and is not used. Workflows run only when the pipeline is triggered with
+`run_probe=true` or `run_bridge=true`.
+
+After the CircleCI project is connected to this GitHub repo (OAuth as
+veilgrok / `bennettbuhner@mail.grokbot.com`):
+
+1. Create a personal API token in CircleCI User Settings and write it to
+   `/home/box/agent-data/secrets/circleci-veilgrok.token` (mode 600).
+2. For the bridge job, set project environment variables
+   `UPSTASH_BOX_API_KEY` and `UPSTASH_BOX_ID` (and optionally
+   `UPSTASH_BOX_BASE_URL`) in the CircleCI UI. Do not put them in the repo.
+3. Trigger a probe or the bridge:
+
+```bash
+python3 circleci_trigger.py --dry-run --jobs 10
+python3 circleci_trigger.py --confirm --jobs 10
+python3 circleci_trigger.py --confirm --bridge
+```
+
+The script polls the v2 API, writes job timings (queue and run seconds)
+under `results/circleci-<pipeline-number>/timings.json`, and downloads
+artifacts when they exist. It never prints the token.
+
+### Buildkite
+
+Published Free-plan limits: 2,000 Linux AMD64 hosted-agent vCPU minutes
+per month, Small shape only (2 vCPU / 4 GB), 10 concurrent jobs / 20
+vCPU. ARM and larger hosted shapes are not on the Free plan.
+
+UI steps after signup:
+
+1. Create a cluster (or use the default) and a hosted queue whose key is
+   `hosted` with instance shape `LINUX_AMD64_2X4`.
+2. Create a pipeline for this repo, YAML steps at
+   `.buildkite/pipeline.yml`, in that same cluster. Turn off automatic
+   branch / pull-request builds so a push does not start an empty build.
+3. Write an API token (read/write builds) to
+   `/home/box/agent-data/secrets/buildkite-veilgrok.token` (mode 600).
+4. For the bridge job, set `UPSTASH_BOX_API_KEY` and `UPSTASH_BOX_ID` as
+   pipeline environment variables.
+
+```bash
+python3 buildkite_trigger.py --dry-run --jobs 10
+python3 buildkite_trigger.py --confirm --jobs 10
+python3 buildkite_trigger.py --confirm --bridge
+```
+
+To spend no hosted minutes, start a short-lived self-hosted agent that
+disconnects when idle, then trigger with `--queue ephemeral`:
+
+```bash
+BUILDKITE_AGENT_TOKEN_FILE=/home/box/agent-data/secrets/buildkite-veilgrok.agent.token \
+  ./buildkite_ephemeral_agent.sh
+```
+
+The agent token is not the API token. Neither file is printed.
+
+### Blacksmith
+
+Published free allowance: 3,000 x64 2-vCPU minutes per month per GitHub
+organization. 4 vCPU draws 2x; ARM 2-vCPU draws 0.625x. Blacksmith
+requires a GitHub organization; a personal `veilgrok/runner-probe` repo
+may need a free org before the app can be installed.
+
+`.github/workflows/blacksmith-probe.yml` is `workflow_dispatch` only.
+It runs N jobs on `blacksmith-2vcpu-ubuntu-2404`, plus one
+`blacksmith-4vcpu-ubuntu-2404` and one `blacksmith-2vcpu-ubuntu-2404-arm`
+when `include_larger` is true (the default). Do not dispatch it until
+the Blacksmith GitHub App is installed; a run started earlier will sit
+on "Waiting for a runner".
+
+Once the app is installed (and only then):
+
+```bash
+# TOKEN_FILE is the existing veilgrok PAT. Never print it.
+DISPATCH_TIME=$(python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"))')
+GH_TOKEN=$(tr -d '\r\n' < /home/box/agent-data/secrets/gh-veilgrok.token) \
+  gh workflow run blacksmith-probe.yml --repo veilgrok/runner-probe \
+    -f jobs=10 -f dispatch_time="$DISPATCH_TIME"
+```
+
+### Tokens and UI leftovers
+
+| Pool | Token / secret file | Extra UI or app step |
+| --- | --- | --- |
+| GitHub Actions | `/home/box/agent-data/secrets/gh-veilgrok.token` (already present) | Actions secrets for the bridge (set by `run.sh`) |
+| CircleCI | `/home/box/agent-data/secrets/circleci-veilgrok.token` | Connect the GitHub project; project env vars for the bridge |
+| Buildkite | `/home/box/agent-data/secrets/buildkite-veilgrok.token` | Hosted queue `hosted` (`LINUX_AMD64_2X4`); pipeline YAML path; disable auto-builds; optional agent token for the ephemeral script |
+| Blacksmith | same GitHub PAT | Install the Blacksmith GitHub App; may need a GitHub org |
+| Upstash box | existing box env file | Already provisioned; do not enable `keepAlive` |

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import hashlib
 import json
 import socket
@@ -48,7 +49,14 @@ def main() -> None:
     while True:
         now = time.perf_counter()
         if now - last_hello >= 0.4:
-            send({"t": "hello", "name": args.name, "ts": time.time()})
+            hello = {"t": "hello", "name": args.name, "ts": time.time()}
+            pool = os.environ.get("WORKER_POOL") or ""
+            if pool:
+                hello["pool"] = pool
+            if args.name:
+                # Renew any in-flight lease by identifying this worker.
+                hello["lease"] = True
+            send(hello)
             last_hello = now
         try:
             data, _ = sock.recvfrom(65535)
@@ -59,16 +67,18 @@ def main() -> None:
         except (ValueError, UnicodeDecodeError):
             continue
         typ = msg.get("t")
-        if typ == "bye":
-            send({"t": "bye", "name": args.name})
+        if typ in ("bye", "drain"):
+            # drain = queue is empty; the worker exits itself rather than idling.
+            send({"t": "bye", "name": args.name, "reason": typ})
             return
         if typ == "task":
             lo = int(msg["lo"])
             hi = int(msg["hi"])
             tid = int(msg["id"])
+            lease_id = msg.get("lease_id")
             count = count_primes(lo, hi)
             work_loop(f"{args.name}:{tid}:{lo}:{hi}:{count}".encode(), args.work_ms)
-            send({"t": "result", "id": tid, "name": args.name, "count": count})
+            send({"t": "result", "id": tid, "name": args.name, "count": count, "lease_id": lease_id})
             last_hello = 0.0
 
 

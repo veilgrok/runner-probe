@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import platform
 import socket
 import ssl
 import time
@@ -180,9 +181,11 @@ def main() -> None:
 
     result = {
         "matrix_index": int(os.environ.get("MATRIX_INDEX") or "0"),
+        "pool": os.environ.get("PROBE_POOL") or "",
+        "resource_class": os.environ.get("RESOURCE_CLASS") or "",
         "runner_name": os.environ.get("RUNNER_NAME") or "",
-        "runner_os": os.environ.get("RUNNER_OS") or "",
-        "runner_arch": os.environ.get("RUNNER_ARCH") or "",
+        "runner_os": os.environ.get("RUNNER_OS") or platform.system(),
+        "runner_arch": os.environ.get("RUNNER_ARCH") or platform.machine(),
         "dispatch_time": dispatch or None,
         "job_start_time": start,
         "queue_seconds": queue_seconds,

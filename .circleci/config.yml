@@ -1,0 +1,194 @@
+# CircleCI overflow-pool harness for runner-probe.
+# Jobs stay off unless a pipeline is triggered with run_probe or run_bridge.
+# A push with the default parameters starts no jobs and burns no credits.
+#
+# Free-plan resource classes used here (published, Oct 2026 price list):
+#   docker medium       2 vCPU / 4 GB   10 credits/min   (concurrency baseline)
+#   docker large        4 vCPU / 8 GB   20 credits/min   (largest free x86 Docker)
+#   docker arm.large    4 vCPU / 16 GB  26 credits/min   (largest free Arm Docker)
+#   machine arm.medium  2 vCPU / 8 GB / 100 GB           (requested Arm VM class)
+# Docker xlarge and Arm xlarge are Performance-plan only, so they are not used.
+# Arm Docker Gen2 Large (12 credits/min) is a better value if the account has
+# it; the class name is not hard-coded here because a typo would fail the job.
+#
+# Trigger (token file is never printed):
+#   python3 circleci_trigger.py --jobs 10
+#   python3 circleci_trigger.py --bridge
+
+version: 2.1
+
+parameters:
+  run_probe:
+    type: boolean
+    default: false
+  run_bridge:
+    type: boolean
+    default: false
+  jobs:
+    type: integer
+    default: 10
+  dispatch_time:
+    type: string
+    default: ""
+
+executors:
+  docker-medium:
+    docker:
+      - image: cimg/python:3.12
+    resource_class: medium
+  docker-large:
+    docker:
+      - image: cimg/python:3.12
+    resource_class: large
+  arm-docker-large:
+    docker:
+      - image: cimg/python:3.12
+    resource_class: arm.large
+  arm-medium:
+    machine:
+      image: ubuntu-2404:current
+    resource_class: arm.medium
+  docker-python-node:
+    docker:
+      - image: cimg/python:3.12-node
+    resource_class: medium
+
+commands:
+  run_probe_script:
+    parameters:
+      resource_label:
+        type: string
+    steps:
+      - checkout
+      - run:
+          name: Probe this executor
+          environment:
+            PROBE_POOL: circleci
+            RESOURCE_CLASS: << parameters.resource_label >>
+            DISPATCH_TIME: << pipeline.parameters.dispatch_time >>
+          command: |
+            set +x
+            export MATRIX_INDEX="${CIRCLE_NODE_INDEX:-0}"
+            export RUNNER_NAME="circleci-<< parameters.resource_label >>-${CIRCLE_BUILD_NUM:-0}-${MATRIX_INDEX}"
+            export RUNNER_OS="${RUNNER_OS:-Linux}"
+            export RUNNER_ARCH="${RUNNER_ARCH:-$(uname -m)}"
+            if [ -z "${DISPATCH_TIME}" ]; then
+              DISPATCH_TIME="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
+              export DISPATCH_TIME
+            fi
+            python3 --version || { sudo apt-get update -y && sudo apt-get install -y python3; }
+            python3 .github/scripts/probe_job.py
+      - run:
+          name: Stage probe.json for the aggregate job
+          command: |
+            idx="${CIRCLE_NODE_INDEX:-0}"
+            dest="artifacts/probe-<< parameters.resource_label >>-${idx}"
+            mkdir -p "$dest"
+            cp probe.json "$dest/probe.json"
+      - store_artifacts:
+          path: artifacts
+      - persist_to_workspace:
+          root: .
+          paths:
+            - artifacts
+
+jobs:
+  probe-medium:
+    parameters:
+      n:
+        type: integer
+        default: 10
+    executor: docker-medium
+    parallelism: << parameters.n >>
+    steps:
+      - run_probe_script:
+          resource_label: medium
+
+  probe-docker-large:
+    executor: docker-large
+    steps:
+      - run_probe_script:
+          resource_label: large
+
+  probe-arm-docker-large:
+    executor: arm-docker-large
+    steps:
+      - run_probe_script:
+          resource_label: arm.large
+
+  probe-arm-medium:
+    executor: arm-medium
+    steps:
+      - run_probe_script:
+          resource_label: arm.medium
+
+  aggregate:
+    executor: docker-medium
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      - run:
+          name: Aggregate probe.json files
+          command: python3 .github/scripts/aggregate.py
+      - store_artifacts:
+          path: summary.json
+          destination: summary
+
+  bridge:
+    executor: docker-python-node
+    environment:
+      DISPATCH_TIME: << pipeline.parameters.dispatch_time >>
+      BRIDGE_OUT_DIR: bridge-out
+      WORK_MS: "120"
+      DROP_WORK_MS: "200"
+    steps:
+      - checkout
+      - run:
+          name: Check required Upstash environment variables
+          command: |
+            set +x
+            missing=
+            [ -n "${UPSTASH_BOX_API_KEY:-}" ] || missing="$missing UPSTASH_BOX_API_KEY"
+            [ -n "${UPSTASH_BOX_ID:-}" ] || missing="$missing UPSTASH_BOX_ID"
+            if [ -n "$missing" ]; then
+              echo "Missing required project environment variables:$missing"
+              echo "Set them in CircleCI Project Settings > Environment Variables."
+              exit 1
+            fi
+            echo "Required environment variables are present."
+      - run:
+          name: Install Node dependencies
+          command: npm install --omit=dev --no-audit --no-fund
+      - run:
+          name: Run equivalent aggregation test
+          no_output_timeout: 5m
+          command: |
+            set +x
+            python3 equiv/run_bridge_test.py
+      - store_artifacts:
+          path: bridge-out
+          destination: bridge-results
+
+workflows:
+  probe:
+    when:
+      equal: [true, << pipeline.parameters.run_probe >>]
+    jobs:
+      - probe-medium:
+          n: << pipeline.parameters.jobs >>
+      - probe-docker-large
+      - probe-arm-docker-large
+      - probe-arm-medium
+      - aggregate:
+          requires:
+            - probe-medium
+            - probe-docker-large
+            - probe-arm-docker-large
+            - probe-arm-medium
+
+  bridge:
+    when:
+      equal: [true, << pipeline.parameters.run_bridge >>]
+    jobs:
+      - bridge

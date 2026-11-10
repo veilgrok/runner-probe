@@ -1,0 +1,40 @@
+# Buildkite overflow-pool harness for runner-probe.
+#
+# Free plan (published, Buildkite pricing 2026):
+#   - 2,000 Linux AMD64 hosted-agent vCPU minutes per month
+#   - Small shape only: 2 vCPU / 4 GB (LINUX_AMD64_2X4)
+#   - Up to 10 concurrent jobs / 20 hosted vCPU
+#   - ARM, Medium, and larger hosted shapes are not on the Free plan
+#   - Self-hosted agents: also up to 10 concurrent jobs
+#
+# This pipeline runs no probe or bridge work on a git push. Steps only
+# appear when the triggering build sets RUN_PROBE=1 or RUN_BRIDGE=1
+# (see buildkite_trigger.py). Also turn off "Build pull requests" /
+# automatic branch builds in the pipeline settings so pushes do not
+# even start an empty build.
+#
+# UI steps after signup:
+#   1. Create a cluster (or use the default).
+#   2. Create a hosted queue keyed "hosted" with instance shape LINUX_AMD64_2X4.
+#   3. Create a pipeline pointed at this repo, YAML steps at
+#      .buildkite/pipeline.yml, in the same cluster as that queue.
+#   4. Store an API token at /home/box/agent-data/secrets/buildkite-veilgrok.token.
+#   5. Optionally set project env vars UPSTASH_BOX_API_KEY and UPSTASH_BOX_ID
+#      for the bridge job.
+#
+# Trigger:
+#   python3 buildkite_trigger.py --jobs 10
+#   python3 buildkite_trigger.py --bridge
+#
+# To use a self-hosted ephemeral agent instead of hosted minutes, see
+# buildkite_ephemeral_agent.sh and set BUILDKITE_QUEUE to that agent queue.
+
+agents:
+  queue: "hosted"
+
+steps:
+  - label: ":pipeline: upload probe or bridge"
+    key: upload
+    if: 'build.env("RUN_PROBE") == "1" || build.env("RUN_BRIDGE") == "1"'
+    command: python3 .github/scripts/buildkite_upload.py
+    timeout_in_minutes: 2
