@@ -1,0 +1,53 @@
+name: Linux x64+ARM probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      hold:
+        description: Seconds each job holds (for overlap measurement)
+        required: false
+        default: "60"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 6
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-latest, ubuntu-latest, ubuntu-latest, ubuntu-latest, ubuntu-latest, ubuntu-latest, ubuntu-latest, ubuntu-latest, ubuntu-latest, ubuntu-24.04-arm, ubuntu-24.04-arm, ubuntu-24.04-arm, ubuntu-24.04-arm, ubuntu-24.04-arm, ubuntu-24.04-arm, ubuntu-24.04-arm, ubuntu-24.04-arm, ubuntu-24.04-arm, ubuntu-24.04-arm]
+    steps:
+      - name: Info and hold
+        shell: bash
+        env:
+          HOLD: ${{ inputs.hold }}
+        run: |
+          PYB=$(command -v python3 || command -v python)
+          "$PYB" - <<'PY'
+          import os, platform, shutil, subprocess, json, time
+          d = {"os": platform.system(), "machine": platform.machine(), "cpus": os.cpu_count(), "release": platform.release()}
+          try:
+              if d["os"] == "Linux":
+                  for l in open("/proc/meminfo"):
+                      if l.startswith("MemTotal"): d["mem_gib"] = round(int(l.split()[1])/1048576, 2)
+                  d["cpu_model"] = next((l.split(":",1)[1].strip() for l in open("/proc/cpuinfo") if l.lower().startswith(("model name","cpu part"))), "")
+              elif d["os"] == "Darwin":
+                  d["mem_gib"] = round(int(subprocess.check_output(["sysctl","-n","hw.memsize"]))/2**30, 2)
+                  d["cpu_model"] = subprocess.check_output(["sysctl","-n","machdep.cpu.brand_string"]).decode().strip()
+              else:
+                  out = subprocess.check_output(["powershell","-NoProfile","-Command","(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory"]).decode().strip()
+                  d["mem_gib"] = round(int(out)/2**30, 2)
+                  d["cpu_model"] = platform.processor()
+          except Exception as e:
+              d["err"] = str(e)
+          root = "C:\\" if d["os"] == "Windows" else "/"
+          t, u, f = shutil.disk_usage(root)
+          d["disk_total_gb"] = round(t/1e9, 1); d["disk_free_gb"] = round(f/1e9, 1)
+          d["gpu"] = bool(shutil.which("nvidia-smi"))
+          print("PROBE " + json.dumps(d))
+          PY
+          sleep "${HOLD:-90}"
