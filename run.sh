@@ -230,7 +230,7 @@ dispatch() {
     exit 1
   fi
   echo "Run id $run_id for $workflow"
-  gh run view "$run_id" --repo "$REPO" --json url,status,conclusion,htmlUrl --jq '{url:(.htmlUrl // .url),status,conclusion}'
+  gh run view "$run_id" --repo "$REPO" --json url,status,conclusion --jq '{url,status,conclusion}'
   if ! gh run watch "$run_id" --repo "$REPO" --exit-status; then
     echo "Run $run_id did not succeed. Fetching view:" >&2
     gh run view "$run_id" --repo "$REPO" >&2 || true
@@ -246,8 +246,8 @@ dispatch() {
   gh run download "$run_id" --repo "$REPO" -D "$dest"
   echo "Downloaded artifacts to $dest"
   # Record the run URL next to the artifacts.
-  gh run view "$run_id" --repo "$REPO" --json url,htmlUrl,status,conclusion,displayTitle,createdAt,updatedAt,jobs \
-    --jq '{url:(.htmlUrl // .url),status,conclusion,title:.displayTitle,createdAt,updatedAt}' \
+  gh run view "$run_id" --repo "$REPO" --json url,status,conclusion,displayTitle,createdAt,updatedAt \
+    --jq '{url,status,conclusion,title:.displayTitle,createdAt,updatedAt}' \
     > "$dest/run-meta.json" || true
 }
 

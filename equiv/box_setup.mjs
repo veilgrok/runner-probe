@@ -66,13 +66,13 @@ if (cmd === "resume") {
   const name = process.env.BOX_WORKER_NAME || "upstash-box";
   const listen = process.env.VEIL_AGENT_PORT || "27710";
   const controller = process.env.BOX_RELAY_PORT || "17810";
-  // nohup so the worker can outlive a closed exec.session (job-end simulation).
-  const script = `cd ${remoteDir} && rm -f worker.pid worker.log && nohup python3 -u worker.py --listen 127.0.0.1:${listen} --controller 127.0.0.1:${controller} --name ${name} --work-ms ${workMs} > worker.log 2>&1 < /dev/null & echo $! > worker.pid && sleep 0.2 && test -d /proc/$(cat worker.pid) && echo WORKER_STARTED && cat worker.pid`;
+  // Free the port from any leftover worker, then nohup so it can outlive a closed exec.session.
+  const script = `cd ${remoteDir} && pkill -f 'worker.py --listen' 2>/dev/null || true; sleep 0.3; rm -f worker.pid worker.log && nohup python3 -u worker.py --listen 127.0.0.1:${listen} --controller 127.0.0.1:${controller} --name ${name} --work-ms ${workMs} > worker.log 2>&1 < /dev/null & echo $! > worker.pid && sleep 0.3 && if [ -d /proc/$(cat worker.pid) ]; then echo WORKER_STARTED; cat worker.pid; else echo WORKER_FAILED; tail -n 40 worker.log || true; exit 1; fi`;
   const r = await exec(script);
   console.log(r.text.trim());
   if (!r.text.includes("WORKER_STARTED")) process.exit(1);
 } else if (cmd === "stop-worker") {
-  const script = `if [ -f ${remoteDir}/worker.pid ]; then kill $(cat ${remoteDir}/worker.pid) 2>/dev/null || true; sleep 0.2; if [ -d /proc/$(cat ${remoteDir}/worker.pid) ]; then kill -9 $(cat ${remoteDir}/worker.pid) 2>/dev/null || true; fi; echo STOPPED; else echo NO_PID; fi`;
+  const script = `pkill -f 'worker.py --listen' 2>/dev/null || true; if [ -f ${remoteDir}/worker.pid ]; then kill $(cat ${remoteDir}/worker.pid) 2>/dev/null || true; sleep 0.2; kill -9 $(cat ${remoteDir}/worker.pid) 2>/dev/null || true; rm -f ${remoteDir}/worker.pid; fi; echo STOPPED`;
   const r = await exec(script);
   console.log(r.text.trim());
 } else if (cmd === "inspect") {
