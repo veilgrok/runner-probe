@@ -148,11 +148,10 @@ def main() -> None:
         "commit": args.commit,
         "branch": args.branch,
         "message": "bridge" if args.bridge else f"probe jobs={n}",
-        "env": redact_env(env),
+        "env": env,
     }
-    public_env = redact_env(env)
     public_body = dict(body)
-    public_body["env"] = public_env
+    public_body["env"] = redact_env(env)
     print(json.dumps({"org": args.org, "pipeline": args.pipeline, "payload": public_body}, indent=2))
     if args.dry_run:
         print("dry-run: no build triggered")
