@@ -1,0 +1,67 @@
+name: Runner plus Upstash bridge
+
+on:
+  workflow_dispatch:
+    inputs:
+      dispatch_time:
+        description: UTC ISO-8601 dispatch timestamp from the trigger
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+# One short job, hard-capped at 5 minutes. No long retries, no mining.
+jobs:
+  bridge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Node dependencies
+        run: npm install --omit=dev --no-audit --no-fund
+
+      - name: Check required secrets
+        env:
+          UPSTASH_BOX_API_KEY: ${{ secrets.UPSTASH_BOX_API_KEY }}
+          UPSTASH_BOX_ID: ${{ secrets.UPSTASH_BOX_ID }}
+        run: |
+          set +x
+          missing=
+          [ -n "$UPSTASH_BOX_API_KEY" ] || missing="$missing UPSTASH_BOX_API_KEY"
+          [ -n "$UPSTASH_BOX_ID" ] || missing="$missing UPSTASH_BOX_ID"
+          if [ -n "$missing" ]; then
+            echo "Missing required Actions secrets:$missing"
+            exit 1
+          fi
+          echo "Required secrets are present."
+
+      - name: Run equivalent aggregation test
+        env:
+          UPSTASH_BOX_API_KEY: ${{ secrets.UPSTASH_BOX_API_KEY }}
+          UPSTASH_BOX_ID: ${{ secrets.UPSTASH_BOX_ID }}
+          UPSTASH_BOX_BASE_URL: ${{ secrets.UPSTASH_BOX_BASE_URL }}
+          BRIDGE_OUT_DIR: bridge-out
+          WORK_MS: "120"
+          DROP_WORK_MS: "200"
+          DISPATCH_TIME: ${{ inputs.dispatch_time }}
+        run: |
+          set +x
+          python3 equiv/run_bridge_test.py
+
+      - name: Upload bridge results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bridge-results
+          path: |
+            bridge-out/bridge-summary.json
+            bridge-out/bridge-report.json
+            bridge-out/rtt.json
+            bridge-out/*.json
+            bridge-out/inspect-*.txt
+            bridge-out/*.log
+          if-no-files-found: warn

@@ -1,0 +1,106 @@
+name: Runner probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      jobs:
+        description: Number of ubuntu-latest jobs (1-20)
+        required: false
+        default: "10"
+        type: string
+      dispatch_time:
+        description: UTC ISO-8601 dispatch timestamp from the trigger (for queue time)
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+      dispatch_time: ${{ steps.gen.outputs.dispatch_time }}
+      n: ${{ steps.gen.outputs.n }}
+    steps:
+      - name: Build matrix
+        id: gen
+        env:
+          JOBS: ${{ inputs.jobs }}
+          DISPATCH_TIME: ${{ inputs.dispatch_time }}
+        run: |
+          python3 << 'PY'
+          import json, os
+          from datetime import datetime, timezone
+          from pathlib import Path
+          raw = (os.environ.get("JOBS") or "10").strip()
+          try:
+              n = int(raw)
+          except ValueError:
+              raise SystemExit(f"jobs must be an integer, got {raw!r}")
+          n = max(1, min(20, n))
+          dt = (os.environ.get("DISPATCH_TIME") or "").strip()
+          if not dt:
+              dt = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+          matrix = {"include": [{"index": i} for i in range(n)]}
+          out = Path(os.environ["GITHUB_OUTPUT"])
+          with out.open("a", encoding="utf-8") as f:
+              f.write(f"n={n}\n")
+              f.write(f"dispatch_time={dt}\n")
+              f.write(f"matrix={json.dumps(matrix, separators=(',', ':'))}\n")
+          print("jobs", n)
+          PY
+
+  probe:
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Probe this runner
+        env:
+          MATRIX_INDEX: ${{ matrix.index }}
+          RUNNER_NAME: ${{ runner.name }}
+          DISPATCH_TIME: ${{ needs.setup.outputs.dispatch_time }}
+        run: python3 .github/scripts/probe_job.py
+
+      - name: Upload probe JSON
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-${{ matrix.index }}
+          path: probe.json
+          if-no-files-found: error
+
+  aggregate:
+    needs: [setup, probe]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download probe artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: probe-*
+          merge-multiple: false
+
+      - name: Aggregate
+        run: python3 .github/scripts/aggregate.py
+
+      - name: Upload summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: summary
+          path: summary.json
+          if-no-files-found: error
