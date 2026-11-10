@@ -226,10 +226,8 @@ def main() -> None:
             stop_proc(ctrl)
 
         print("PHASE combined", flush=True)
-        # Restart the box worker in case a previous phase stopped it.
-        node("box_setup.mjs", "stop-worker", timeout=30)
-        node("box_setup.mjs", "start-worker", timeout=30)
-        time.sleep(0.4)
+        # The box worker is left running after box-only (--no-bye). Do not
+        # restart it here; a second bind on the same port would fail.
         local = start_local_worker("runner", 27700, WORK_MS)
         out = OUT_DIR / "combined.json"
         status = OUT_DIR / "combined-status.json"
