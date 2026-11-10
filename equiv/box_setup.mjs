@@ -67,12 +67,25 @@ if (cmd === "resume") {
   const listen = process.env.VEIL_AGENT_PORT || "27710";
   const controller = process.env.BOX_RELAY_PORT || "17810";
   // Free the port from any leftover worker, then nohup so it can outlive a closed exec.session.
-  const script = `cd ${remoteDir} && pkill -f '[w]orker.py --listen' 2>/dev/null || true; sleep 0.3; rm -f worker.pid worker.log && nohup python3 -u worker.py --listen 127.0.0.1:${listen} --controller 127.0.0.1:${controller} --name ${name} --work-ms ${workMs} > worker.log 2>&1 < /dev/null & echo $! > worker.pid && sleep 0.3 && if [ -d /proc/$(cat worker.pid) ]; then echo WORKER_STARTED; cat worker.pid; else echo WORKER_FAILED; tail -n 40 worker.log || true; exit 1; fi`;
+  const script = `cd ${remoteDir} && python3 -c "import os,signal,pathlib;
+for p in pathlib.Path('/proc').iterdir():
+
+    if not p.name.isdigit(): continue
+    try: c=open(p/'cmdline','rb').read().replace(bytes([0]),b' ').decode();
+    except Exception: continue
+    if 'worker.py' in c and 'python' in c and int(p.name)!=os.getpid():
+        os.kill(int(p.name), signal.SIGKILL); print('killed', p.name)" ; sleep 0.3; rm -f worker.pid worker.log && nohup python3 -u worker.py --listen 127.0.0.1:${listen} --controller 127.0.0.1:${controller} --name ${name} --work-ms ${workMs} > worker.log 2>&1 < /dev/null & echo $! > worker.pid && sleep 0.3 && if [ -d /proc/$(cat worker.pid) ]; then echo WORKER_STARTED; cat worker.pid; else echo WORKER_FAILED; tail -n 40 worker.log || true; exit 1; fi`;
   const r = await exec(script);
   console.log(r.text.trim());
   if (!r.text.includes("WORKER_STARTED")) process.exit(1);
 } else if (cmd === "stop-worker") {
-  const script = `pkill -f '[w]orker.py --listen' 2>/dev/null || true; if [ -f ${remoteDir}/worker.pid ]; then kill $(cat ${remoteDir}/worker.pid) 2>/dev/null || true; sleep 0.2; kill -9 $(cat ${remoteDir}/worker.pid) 2>/dev/null || true; rm -f ${remoteDir}/worker.pid; fi; echo STOPPED`;
+  const script = `python3 -c "import os,signal,pathlib;
+for p in pathlib.Path('/proc').iterdir():
+    if not p.name.isdigit(): continue
+    try: c=open(p/'cmdline','rb').read().replace(bytes([0]),b' ').decode();
+    except Exception: continue
+    if 'worker.py' in c and 'python' in c and int(p.name)!=os.getpid():
+        os.kill(int(p.name), signal.SIGKILL); print('killed', p.name)" ; rm -f ${remoteDir}/worker.pid; echo STOPPED`;
   const r = await exec(script);
   console.log(r.text.trim());
 } else if (cmd === "inspect") {
