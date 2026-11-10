@@ -25,19 +25,21 @@ def yaml_quote(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "") + '"'
 
 
-def probe_command(meta_key: str) -> list[str]:
+def probe_command(meta_key: str, indent: int = 8) -> list[str]:
     # Publish probe.json to build meta-data so we can read it with the
     # existing token (read_builds). The token cannot read artifacts or logs.
+    pad = " " * indent
+    body = " " * (indent + 2)
     return [
-        "        command: |",
-        "          set +x",
-        '          export RUNNER_NAME="buildkite-${RESOURCE_CLASS}-${BUILDKITE_BUILD_NUMBER:-0}-${MATRIX_INDEX}"',
-        '          export RUNNER_OS="${RUNNER_OS:-Linux}"',
-        '          export RUNNER_ARCH="${RUNNER_ARCH:-$(uname -m)}"',
-        "          python3 .github/scripts/probe_job.py",
-        f"          mkdir -p artifacts/{meta_key}",
-        f"          cp probe.json artifacts/{meta_key}/probe.json",
-        f"          buildkite-agent meta-data set {yaml_quote(meta_key)} \"$(cat probe.json)\"",
+        f"{pad}command: |",
+        f"{body}set +x",
+        f'{body}export RUNNER_NAME="buildkite-${{RESOURCE_CLASS}}-${{BUILDKITE_BUILD_NUMBER:-0}}-${{MATRIX_INDEX}}"',
+        f'{body}export RUNNER_OS="${{RUNNER_OS:-Linux}}"',
+        f'{body}export RUNNER_ARCH="${{RUNNER_ARCH:-$(uname -m)}}"',
+        f"{body}python3 .github/scripts/probe_job.py",
+        f"{body}mkdir -p artifacts/{meta_key}",
+        f"{body}cp probe.json artifacts/{meta_key}/probe.json",
+        f'{body}buildkite-agent meta-data set {yaml_quote(meta_key)} "$(cat probe.json)"',
     ]
 
 
@@ -61,7 +63,7 @@ def probe_jobs_on_queue(n: int, dispatch: str, queue: str, key_prefix: str = "pr
             f"          RESOURCE_CLASS: {yaml_quote(resource)}",
             f'          MATRIX_INDEX: "{i}"',
             f"          DISPATCH_TIME: {yaml_quote(dispatch)}",
-            *probe_command(meta_key),
+            *probe_command(meta_key, indent=8),
             "        artifact_paths:",
             f"          - artifacts/{meta_key}/probe.json",
         ]
@@ -105,7 +107,7 @@ def size_steps(queues: list[str], dispatch: str) -> list[str]:
             f"      RESOURCE_CLASS: {yaml_quote(resource)}",
             '      MATRIX_INDEX: "0"',
             f"      DISPATCH_TIME: {yaml_quote(dispatch)}",
-            *probe_command(meta_key),
+            *probe_command(meta_key, indent=4),
             "    artifact_paths:",
             f"      - artifacts/{meta_key}/probe.json",
         ]
@@ -116,6 +118,8 @@ def bridge_steps(dispatch: str) -> list[str]:
     return [
         '  - label: ":bridge_at_night: upstash bridge"',
         "    key: bridge",
+        "    agents:",
+        '      queue: "hosted"',
         "    timeout_in_minutes: 5",
         "    env:",
         f"      DISPATCH_TIME: {yaml_quote(dispatch)}",

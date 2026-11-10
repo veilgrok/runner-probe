@@ -23,6 +23,11 @@ API = "https://api.buildkite.com/v2"
 TERMINAL = {"passed", "failed", "canceled", "cancelled", "skipped", "not_run", "blocked"}
 
 
+def redact_env(env: dict) -> dict:
+    return {k: ("[set]" if k.startswith("UPSTASH_") or k in {"BOX_API_KEY", "BOX_ID", "BOX_BASE_URL"} else v) for k, v in env.items()}
+
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
@@ -143,9 +148,9 @@ def main() -> None:
         "commit": args.commit,
         "branch": args.branch,
         "message": "bridge" if args.bridge else f"probe jobs={n}",
-        "env": {k: ("[set]" if k.startswith("UPSTASH_") else v) for k, v in env.items()},
+        "env": redact_env(env),
     }
-    public_env = {k: ("[set]" if k.startswith("UPSTASH_") else v) for k, v in env.items()}
+    public_env = redact_env(env)
     public_body = dict(body)
     public_body["env"] = public_env
     print(json.dumps({"org": args.org, "pipeline": args.pipeline, "payload": public_body}, indent=2))
@@ -213,7 +218,7 @@ def main() -> None:
         "state": build.get("state"),
         "created_at": build.get("created_at"),
         "dispatch_time": when,
-        "env": env,
+        "env": redact_env(env),
         "jobs": job_rows,
         "queue_seconds": {
             "min": min((j["queue_seconds"] for j in job_rows if isinstance(j.get("queue_seconds"), (int, float))), default=None),
