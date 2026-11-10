@@ -147,19 +147,23 @@ You can also run a workflow from the Actions tab, passing `jobs` and a
   for, or enable `keepAlive` on a box.
 - Outbound UDP notes in the probe are observational only.
 
-## Overflow pools (CircleCI, Buildkite, Blacksmith)
+## Overflow pools (CircleCI, Buildkite, Blacksmith, Daytona, E2B)
 
 These are off by default. A push to `main` must not start probe or bridge
 jobs on any of them. Trigger scripts require `--confirm` and will not
 run against a service until its token file exists and you opt in.
 
 The Upstash dispatcher in `equiv/dispatcher.py` treats `gha`, `circleci`,
-`buildkite`, `blacksmith`, and `upstash_box` as pluggable pools. It issues
-per-task leases, renews them on worker heartbeats, reassigns a task if a
-worker goes silent (the same mid-run-kill idea as `bridge.yml`), and
-sends `drain` so workers exit themselves when the queue is empty. Remote
-pools refuse to spawn unless `allow_remote=True`, and even then this
-harness does not auto-trigger them yet. Use the scripts below by hand.
+`buildkite`, `blacksmith`, `daytona`, `e2b`, and `upstash_box` as pluggable
+pools. It issues per-task leases, renews them on worker heartbeats,
+reassigns a task if a worker goes silent (the same mid-run-kill idea as
+`bridge.yml`), and sends `drain` so workers exit themselves when the queue
+is empty. Remote CI pools refuse to spawn unless `allow_remote=True`, and
+even then this harness does not auto-trigger CircleCI, Buildkite or
+Blacksmith. Daytona and E2B have API-driven pull adapters in
+`equiv/pools.py`: the control plane creates sandboxes and execs each task
+through the provider API. Pass `allow_remote=True` only when the key file
+is present; tests use `fake=True` and never call the APIs.
 
 Local test, simulated pools only (no CI, no Upstash, no tokens):
 
@@ -255,6 +259,27 @@ GH_TOKEN=$(tr -d '\r\n' < /home/box/agent-data/secrets/gh-veilgrok.token) \
     -f jobs=10 -f dispatch_time="$DISPATCH_TIME"
 ```
 
+### Daytona
+
+The veilgrok Personal org is on Tier 1 ($100 free credit, no card). Tier 1
+egress is restricted: GitHub and PyPI are reachable, the Upstash box host
+is not, so this pool is always API-pull, never an outbound WebSocket.
+Default cap is 5 sandboxes of 2 vCPU / 2 GiB (10 vCPU / 10 GiB, the
+measured Tier 1 pool). Set `DAYTONA_API_KEY` or
+`DAYTONA_API_KEY_FILE` (never print it). `DaytonaPool(..., allow_remote=True)`
+creates ephemeral sandboxes, uploads `equiv/daytona_task.py`, and starts
+local pull workers. Teardown deletes every sandbox it created.
+
+### E2B
+
+The veilgrok Hobby account has a $100 one-time credit. The measured default
+template is 2 vCPU / 0.5 GiB, and 10 of them run at once (20 vCPU / 5 GiB).
+Hobby sandboxes can reach the Upstash box host, so a WebSocket bridge from
+inside a sandbox works; the dispatcher path is still API-pull so it stays
+uniform with Daytona. Set `E2B_API_KEY` or `E2B_API_KEY_FILE`.
+`E2BPool(..., allow_remote=True)` creates sandboxes and starts local pull
+workers. Teardown kills every sandbox it created.
+
 ### Tokens and UI leftovers
 
 | Pool | Token / secret file | Extra UI or app step |
@@ -263,4 +288,6 @@ GH_TOKEN=$(tr -d '\r\n' < /home/box/agent-data/secrets/gh-veilgrok.token) \
 | CircleCI | `/home/box/agent-data/secrets/circleci-veilgrok.token` | Connect the GitHub project; project env vars for the bridge |
 | Buildkite | `/home/box/agent-data/secrets/buildkite-veilgrok.token` | Hosted queue `hosted` (`LINUX_AMD64_2X4`); pipeline YAML path; disable auto-builds; optional agent token for the ephemeral script |
 | Blacksmith | same GitHub PAT | Install the Blacksmith GitHub App; may need a GitHub org |
+| Daytona | `/home/box/agent-data/secrets/daytona-veilgrok.key` | None (email-only account already created). API-pull only on Tier 1 |
+| E2B | `/home/box/agent-data/secrets/e2b-veilgrok.key` | None (Hobby, no card). API-pull dispatcher; optional in-sandbox WS to Box B |
 | Upstash box | existing box env file | Already provisioned; do not enable `keepAlive` |

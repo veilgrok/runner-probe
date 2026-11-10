@@ -13,6 +13,8 @@ from dispatcher import Dispatcher, spawn_allocated, teardown_all
 from oracle import count_primes
 from pools import (
     DEFAULT_ORDER,
+    DaytonaPool,
+    E2BPool,
     RemotePool,
     SimulatedPool,
     allocate,
@@ -34,17 +36,19 @@ def check(cond: bool, name: str, detail: str = "") -> None:
 
 
 def test_allocate() -> None:
-    pools = simulated_pools(caps={"gha": 2, "circleci": 2, "buildkite": 1, "blacksmith": 1, "upstash_box": 1})
+    pools = simulated_pools(caps={"gha": 2, "circleci": 2, "buildkite": 1, "blacksmith": 1, "daytona": 1, "e2b": 1, "upstash_box": 1})
     plan = allocate(5, pools)
     check(plan["gha"] == 2, "allocate fills gha first")
     check(plan["circleci"] == 2, "allocate overflows to circleci")
     check(plan["buildkite"] == 1, "allocate overflows to buildkite")
     check(plan["blacksmith"] == 0, "allocate stops once demand is met")
+    check(plan["daytona"] == 0, "allocate leaves daytona at 0 once demand is met")
+    check(plan["e2b"] == 0, "allocate leaves e2b at 0 once demand is met")
     check(plan["upstash_box"] == 0, "allocate leaves later pools at 0")
-    check(plan["_unassigned"] == 0, "allocate has no leftover for 5 of 7")
+    check(plan["_unassigned"] == 0, "allocate has no leftover for 5 of 9")
     leftover = allocate(20, pools)
-    check(leftover["_unassigned"] == 13, "allocate reports unassigned demand", str(leftover))
-    check(sum(leftover[n] for n in DEFAULT_ORDER) == 7, "allocate never exceeds total cap")
+    check(leftover["_unassigned"] == 11, "allocate reports unassigned demand", str(leftover))
+    check(sum(leftover[n] for n in DEFAULT_ORDER) == 9, "allocate never exceeds total cap")
 
 
 def test_remote_pools_refuse() -> None:
@@ -73,7 +77,7 @@ def _small_workload(n: int = 12) -> tuple[list[tuple[int, int]], list[int]]:
 
 def test_overflow_and_drain() -> None:
     intervals, expected = _small_workload(12)
-    caps = {"gha": 2, "circleci": 2, "buildkite": 1, "blacksmith": 0, "upstash_box": 1}
+    caps = {"gha": 2, "circleci": 2, "buildkite": 1, "blacksmith": 0, "daytona": 0, "e2b": 0, "upstash_box": 1}
     pools = simulated_pools(caps=caps)
     disp = Dispatcher(
         "127.0.0.1:0",
@@ -164,8 +168,65 @@ def test_reassign_on_drop() -> None:
         teardown_all(pools, handles, timeout=2.0)
 
 
+
+def test_daytona_and_e2b_refuse_without_allow_remote() -> None:
+    for pool in (DaytonaPool(cap=1, allow_remote=False), E2BPool(cap=1, allow_remote=False)):
+        try:
+            pool.spawn(1, controller="127.0.0.1:9", work_ms=10, name_prefix="x")
+            check(False, f"{pool.name} refuses spawn without allow_remote", "spawn() returned")
+        except RuntimeError as exc:
+            check("disabled" in str(exc).lower(), f"{pool.name} refuses spawn without allow_remote", str(exc))
+
+
+def _run_fake_pull(pool, name: str) -> None:
+    intervals, expected = _small_workload(8)
+    disp = Dispatcher(
+        "127.0.0.1:0",
+        intervals,
+        expected,
+        heartbeat_timeout=2.0,
+        lease_seconds=4.0,
+        verify_frac=0.0,
+        timeout=30.0,
+        ready_timeout=8.0,
+    )
+    handles = []
+    try:
+        handles = pool.spawn(2, controller=disp.bound, work_ms=40, name_prefix=name)
+        check(len(handles) == 2, f"{pool.name} fake spawn created 2 workers", str(len(handles)))
+        out = disp.run()
+        check(out["started"], f"{pool.name} fake pull dispatcher started")
+        check(out["correct"], f"{pool.name} fake pull matches the oracle", str({k: out[k] for k in ("completed", "correct", "by_pool")}))
+        check(out["completed"] == 8, f"{pool.name} fake pull completed 8 tasks")
+        check((out.get("by_pool") or {}).get(pool.name) == 8, f"{pool.name} pool tag is set on results", str(out.get("by_pool")))
+        deadline = time.time() + 5
+        while time.time() < deadline and any(h.alive() for h in handles):
+            time.sleep(0.05)
+        still = [h.name for h in handles if h.alive()]
+        check(not still, f"{pool.name} fake workers drained", f"still running: {still}")
+    finally:
+        disp.close()
+        pool.teardown(handles, timeout=2.0)
+
+
+def test_daytona_fake_pull() -> None:
+    _run_fake_pull(DaytonaPool(cap=2, allow_remote=True, fake=True), "dt")
+
+
+def test_e2b_fake_pull() -> None:
+    _run_fake_pull(E2BPool(cap=2, allow_remote=True, fake=True), "eb")
+
+
 def main() -> None:
-    tests = [test_allocate, test_remote_pools_refuse, test_overflow_and_drain, test_reassign_on_drop]
+    tests = [
+        test_allocate,
+        test_remote_pools_refuse,
+        test_overflow_and_drain,
+        test_reassign_on_drop,
+        test_daytona_and_e2b_refuse_without_allow_remote,
+        test_daytona_fake_pull,
+        test_e2b_fake_pull,
+    ]
     for fn in tests:
         try:
             fn()
